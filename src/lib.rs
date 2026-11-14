@@ -1,11 +1,110 @@
 use std::sync::Arc;
 
-use winit::{application::ApplicationHandler, event::{KeyEvent, WindowEvent}, event_loop::{ActiveEventLoop, EventLoop}, keyboard::{KeyCode, PhysicalKey}, window::Window};
+use winit::{
+    application::ApplicationHandler,
+    event::{KeyEvent, WindowEvent},
+    event_loop::{ActiveEventLoop, EventLoop},
+    keyboard::{KeyCode, PhysicalKey},
+    window::Window,
+};
 
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::prelude::*;
 #[cfg(target_arch = "wasm32")]
 use winit::platform::web::EventLoopExtWebSys;
+
+struct Grid {
+    texture: wgpu::Texture,
+    view: wgpu::TextureView,
+    sampler: wgpu::Sampler,
+}
+
+impl Grid {
+    // fills the grid with dead cells (black)
+    pub fn clear(&self, queue: &wgpu::Queue) {
+        let texture_size = self.texture.size();
+
+        let total_pixels = (texture_size.width * texture_size.height) as usize;
+        
+        let data: Vec<u8> = [0, 0, 0, 255].repeat(total_pixels);
+
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &self.texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            &data,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(texture_size.width * 4),
+                rows_per_image: Some(texture_size.height),
+            },
+            texture_size,
+        )
+    }
+
+    // fills the grid with random cell generation
+    pub fn random_grid(&self, queue: &wgpu::Queue) {
+        let texture_size = self.texture.size();
+
+        let total_pixels = (texture_size.width * texture_size.height) as usize;
+
+        let mut data: Vec<u8> = Vec::with_capacity(total_pixels * 4);
+
+        for _ in 0..total_pixels {
+            match rand::random_bool(0.2) { // 20% of being true
+                true => data.extend_from_slice(&[255, 255, 255, 255]),
+                false => data.extend_from_slice(&[0, 0, 0, 255]),
+            }
+        }
+
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &self.texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            &data,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(texture_size.width * 4),
+                rows_per_image: Some(texture_size.height),
+            },
+            texture_size,
+        )
+    }
+
+    pub fn set_cell_alive(&self, x: u32, y: u32, queue: &wgpu::Queue) {
+        let alive_pixel: [u8; 4] = [255, 255, 255, 255];
+
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &self.texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d {
+                    x,
+                    y,
+                    z: 0,
+                },
+                aspect: wgpu::TextureAspect::All,
+            },
+            &alive_pixel,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(4),
+                rows_per_image: Some(1),
+            },
+            wgpu::Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            }
+        );
+    }
+}
 
 pub struct State {
     surface: wgpu::Surface<'static>,
@@ -14,6 +113,16 @@ pub struct State {
     config: wgpu::SurfaceConfiguration,
     is_surface_configured: bool,
     window: Arc<Window>,
+    render_pipeline: wgpu::RenderPipeline,
+    compute_pipeline: wgpu::ComputePipeline,
+    grid_a: Grid,
+    grid_b: Grid,
+    use_bind_group_a: bool,
+    render_bind_group_a: wgpu::BindGroup,
+    render_bind_group_b: wgpu::BindGroup,
+    compute_bind_group_a: wgpu::BindGroup,
+    compute_bind_group_b: wgpu::BindGroup,
+    update_simulation: bool,
 }
 
 impl State {
@@ -59,7 +168,9 @@ impl State {
             .await?;
 
         let surface_caps = surface.get_capabilities(&adapter);
-        let surface_format = surface_caps.formats.iter()
+        let surface_format = surface_caps
+            .formats
+            .iter()
             .find(|f| f.is_srgb())
             .copied()
             .unwrap_or(surface_caps.formats[0]);
@@ -72,16 +183,247 @@ impl State {
             alpha_mode: surface_caps.alpha_modes[0],
             view_formats: vec![],
             desired_maximum_frame_latency: 2,
-            color_space: wgpu::SurfaceColorSpace::Auto
+            color_space: wgpu::SurfaceColorSpace::Auto,
+        };
+
+        
+        let grid_dimensions = (256, 256);
+        let texture_size = wgpu::Extent3d {
+            width: grid_dimensions.0,
+            height: grid_dimensions.1,
+            depth_or_array_layers: 1,
+        };
+        let texture_desc = wgpu::TextureDescriptor {
+            label: Some("Grid Texture Descriptor"),
+            size: texture_size,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING |
+            wgpu::TextureUsages::STORAGE_BINDING |
+            wgpu::TextureUsages::COPY_DST,
+            view_formats: &[]
+        };
+        // We need two textures for the compute shader, the texture A is the current grid state and the texture B is the future grid state after updating the grid
+        let texture_a = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Texture A"),
+            ..texture_desc
+        });
+        let texture_b = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Texture B"),
+            ..texture_desc
+        });
+        let view_a = texture_a.create_view(&wgpu::TextureViewDescriptor::default());
+        let view_b = texture_b.create_view(&wgpu::TextureViewDescriptor::default());
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("Grid Sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Nearest,
+            min_filter: wgpu::FilterMode::Nearest,
+            mipmap_filter: wgpu::MipmapFilterMode::Nearest,
+            ..Default::default()
+        });
+        let grid_a = Grid {
+            texture: texture_a,
+            view: view_a,
+            sampler: sampler.clone()
+        };
+        let grid_b = Grid {
+            texture: texture_b,
+            view: view_b,
+            sampler: sampler
         };
         
+        grid_a.random_grid(&queue);
+        
+        let render_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("Render Bind Group Layout"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        multisampled: false,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                ]
+            });
+            let render_bind_group_a = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("Render Bind Group"),
+                layout: &render_bind_group_layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&grid_a.view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&grid_a.sampler),
+                }
+                ],
+        });
+        let render_bind_group_b = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Render Bind Group"),
+            layout: &render_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&grid_b.view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&grid_b.sampler),
+                }
+            ],
+        });
+
+        let compute_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("Compute Bind Group Layout"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Texture {
+                        multisampled: false,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false }
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::StorageTexture {
+                        access: wgpu::StorageTextureAccess::WriteOnly,
+                        format: wgpu::TextureFormat::Rgba8Unorm,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                    },
+                    count: None,
+                },
+            ]
+        });
+
+        let compute_bind_group_a = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Compute Bind Group"),
+            layout: &compute_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&grid_a.view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&grid_b.view),
+                },
+            ]
+        });
+        let compute_bind_group_b = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Compute Bind Group"),
+            layout: &compute_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&grid_b.view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&grid_a.view),
+                },
+                ]
+            });
+            
+        let render_shader = device.create_shader_module(wgpu::include_wgsl!("render.wgsl"));
+        let render_pipeline_layout = {
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("Render Pipeline Layout"),
+                bind_group_layouts: &[Some(&render_bind_group_layout)],
+                immediate_size: 0,
+            })
+        };
+        let render_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("Render Pipeline"),
+            layout: Some(&render_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &render_shader,
+                entry_point: Some("vs_main"),
+                buffers: &[],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &render_shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: config.format,
+                    blend: Some(wgpu::BlendState::REPLACE),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: Some(wgpu::Face::Back),
+                polygon_mode: wgpu::PolygonMode::Fill,
+                unclipped_depth: false,
+                conservative: false,
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState {
+                count: 1,
+                mask: !0,
+                alpha_to_coverage_enabled: false,
+            },
+            multiview_mask: None,
+            cache: None,
+        });
+
+        let compute_shader = device.create_shader_module(wgpu::include_wgsl!("compute.wgsl"));
+        let compute_pipeline_layout = {
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("Compute Pipeline Layout"),
+                bind_group_layouts: &[Some(&compute_bind_group_layout)],
+                immediate_size: 0,
+            })
+        };
+        let compute_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("Compute Pipeline"),
+            layout: Some(&compute_pipeline_layout),
+            module: &compute_shader,
+            entry_point: None,
+            compilation_options: Default::default(),
+            cache: Default::default(),
+        });
+
         Ok(Self {
             surface,
             device,
             queue,
             config,
             is_surface_configured: false,
-            window
+            window,
+            render_pipeline,
+            compute_pipeline,
+            grid_a,
+            grid_b,
+            use_bind_group_a: true,
+            render_bind_group_a,
+            render_bind_group_b,
+            compute_bind_group_a,
+            compute_bind_group_b,
+            update_simulation: false,
         })
     }
 
@@ -96,15 +438,46 @@ impl State {
         }
     }
 
-    pub fn handle_key(&self, event_loop: &ActiveEventLoop, code: KeyCode, is_pressed: bool) {
+    pub fn handle_key(&mut self, event_loop: &ActiveEventLoop, code: KeyCode, is_pressed: bool) {
         match (code, is_pressed) {
             (KeyCode::Escape, true) => event_loop.exit(),
-            _ => ()
+            (KeyCode::Space, true) => self.update_simulation = true,
+            _ => (),
+        }
+    }
+
+    pub fn handle_touch(&mut self, is_screen_touched: bool) {
+        if is_screen_touched {
+            self.update_simulation = true;
         }
     }
 
     pub fn update(&mut self) {
+        if self.update_simulation {
+            let mut encoder = self.device.create_command_encoder(&Default::default());
 
+            let bind_group = match self.use_bind_group_a {
+                true => &self.compute_bind_group_a,
+                false => &self.compute_bind_group_b,
+            };
+            
+            let (workgroup_x, workgroup_y) = {
+                let size = self.grid_a.texture.size();
+                ((size.width + 7) / 8, (size.height + 7) / 8)
+            };
+
+            {
+                let mut pass = encoder.begin_compute_pass(&Default::default());
+                pass.set_pipeline(&self.compute_pipeline);
+                pass.set_bind_group(0, bind_group, &[]);
+                pass.dispatch_workgroups(workgroup_x, workgroup_y, 1);
+            }
+
+            self.use_bind_group_a = !self.use_bind_group_a;
+            self.update_simulation = false;
+
+            self.queue.submit(std::iter::once(encoder.finish()));
+        }
     }
 
     pub fn render(&mut self) -> anyhow::Result<()> {
@@ -126,17 +499,26 @@ impl State {
                 self.surface.configure(&self.device, &self.config);
                 return Ok(());
             }
-            wgpu::CurrentSurfaceTexture::Lost => anyhow::bail!("Lost device")
+            wgpu::CurrentSurfaceTexture::Lost => anyhow::bail!("Lost device"),
         };
 
-        let view = output.texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let view = output
+            .texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
 
-        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("Render Encoder")
-        });
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("Render Encoder"),
+            });
+
+        let bind_group = match self.use_bind_group_a {
+            true => &self.render_bind_group_a,
+            false => &self.render_bind_group_b,
+        };
 
         {
-            let _render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("Render Pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: &view,
@@ -147,16 +529,20 @@ impl State {
                             r: 0.1,
                             g: 0.2,
                             b: 0.3,
-                            a: 1.0
+                            a: 1.0,
                         }),
-                        store: wgpu::StoreOp::Store
-                    }
+                        store: wgpu::StoreOp::Store,
+                    },
                 })],
                 depth_stencil_attachment: None,
                 occlusion_query_set: None,
                 timestamp_writes: None,
-                multiview_mask: None
+                multiview_mask: None,
             });
+            
+            render_pass.set_pipeline(&self.render_pipeline);
+            render_pass.set_bind_group(0, bind_group, &[]);
+            render_pass.draw(0..3, 0..1);
         }
 
         self.queue.submit(std::iter::once(encoder.finish()));
@@ -173,7 +559,7 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(#[cfg(target_arch = "wasm32")]event_loop: &EventLoop<State>) -> Self {
+    pub fn new(#[cfg(target_arch = "wasm32")] event_loop: &EventLoop<State>) -> Self {
         #[cfg(target_arch = "wasm32")]
         let proxy = Some(event_loop.create_proxy());
         Self {
@@ -193,7 +579,7 @@ impl ApplicationHandler<State> for App {
         {
             use wasm_bindgen::JsCast;
             use winit::platform::web::WindowAttributesExtWebSys;
-            
+
             const CANVAS_ID: &str = "canvas";
 
             let window = wgpu::web_sys::window().unwrap_throw();
@@ -205,31 +591,36 @@ impl ApplicationHandler<State> for App {
 
         let window = Arc::new(event_loop.create_window(window_attributes).unwrap());
 
-        #[cfg(not(target_arch = "wasm32"))] {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
             self.state = Some(pollster::block_on(State::new(window)).unwrap());
         }
 
-        #[cfg(target_arch = "wasm32")] {
+        #[cfg(target_arch = "wasm32")]
+        {
             if let Some(proxy) = self.proxy.take() {
                 wasm_bindgen_futures::spawn_local(async move {
-                    assert!(proxy
-                        .send_event(
-                            State::new(window)
-                                .await
-                                .expect("Unable to create canvas!!!")
-                        )
-                        .is_ok())
+                    assert!(
+                        proxy
+                            .send_event(
+                                State::new(window)
+                                    .await
+                                    .expect("Unable to create canvas!!!")
+                            )
+                            .is_ok()
+                    )
                 });
             }
         }
     }
 
     fn user_event(&mut self, _event_loop: &ActiveEventLoop, mut event: State) {
-        #[cfg(target_arch = "wasm32")] {
+        #[cfg(target_arch = "wasm32")]
+        {
             event.window.request_redraw();
             event.resize(
                 event.window.inner_size().width,
-                event.window.inner_size().height
+                event.window.inner_size().height,
             );
         }
         self.state = Some(event);
@@ -260,35 +651,41 @@ impl ApplicationHandler<State> for App {
                 }
             }
             WindowEvent::KeyboardInput {
-                event: KeyEvent {
-                    physical_key: PhysicalKey::Code(code),
-                    state: key_state,
-                    ..
-                },
+                event:
+                    KeyEvent {
+                        physical_key: PhysicalKey::Code(code),
+                        state: key_state,
+                        ..
+                    },
                 ..
             } => state.handle_key(event_loop, code, key_state.is_pressed()),
+            WindowEvent::Touch(touch) => state.handle_touch(touch.phase == winit::event::TouchPhase::Started || touch.phase == winit::event::TouchPhase::Moved),
             _ => {}
         }
     }
 }
 
 pub fn run() -> anyhow::Result<()> {
-    #[cfg(not(target_arch = "wasm32"))] {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
         env_logger::init();
     }
 
-    #[cfg(target_arch = "wasm32")] {
+    #[cfg(target_arch = "wasm32")]
+    {
         console_log::init_with_level(log::Level::Info).unwrap_throw();
     }
 
     let event_loop = EventLoop::with_user_event().build()?;
-    #[cfg(not(target_arch = "wasm32"))] {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
         let mut app = App::new();
         event_loop.run_app(&mut app)?;
     }
-    #[cfg(target_arch = "wasm32")] {
+    #[cfg(target_arch = "wasm32")]
+    {
         let app = App::new(&event_loop);
-        event_loop.spawn_app(app);  
+        event_loop.spawn_app(app);
     }
 
     Ok(())
