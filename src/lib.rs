@@ -1,3 +1,5 @@
+mod grid;
+
 use std::sync::Arc;
 
 use winit::{
@@ -13,99 +15,6 @@ use wasm_bindgen::prelude::*;
 #[cfg(target_arch = "wasm32")]
 use winit::platform::web::EventLoopExtWebSys;
 
-struct Grid {
-    texture: wgpu::Texture,
-    view: wgpu::TextureView,
-    sampler: wgpu::Sampler,
-}
-
-impl Grid {
-    // fills the grid with dead cells (black)
-    pub fn clear(&self, queue: &wgpu::Queue) {
-        let texture_size = self.texture.size();
-
-        let total_pixels = (texture_size.width * texture_size.height) as usize;
-        
-        let data: Vec<u8> = [0, 0, 0, 255].repeat(total_pixels);
-
-        queue.write_texture(
-            wgpu::TexelCopyTextureInfo {
-                texture: &self.texture,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            &data,
-            wgpu::TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(texture_size.width * 4),
-                rows_per_image: Some(texture_size.height),
-            },
-            texture_size,
-        )
-    }
-
-    // fills the grid with random cell generation
-    pub fn random_grid(&self, queue: &wgpu::Queue) {
-        let texture_size = self.texture.size();
-
-        let total_pixels = (texture_size.width * texture_size.height) as usize;
-
-        let mut data: Vec<u8> = Vec::with_capacity(total_pixels * 4);
-
-        for _ in 0..total_pixels {
-            match rand::random_bool(0.2) { // 20% of being true
-                true => data.extend_from_slice(&[255, 255, 255, 255]),
-                false => data.extend_from_slice(&[0, 0, 0, 255]),
-            }
-        }
-
-        queue.write_texture(
-            wgpu::TexelCopyTextureInfo {
-                texture: &self.texture,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            &data,
-            wgpu::TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(texture_size.width * 4),
-                rows_per_image: Some(texture_size.height),
-            },
-            texture_size,
-        )
-    }
-
-    pub fn set_cell_alive(&self, x: u32, y: u32, queue: &wgpu::Queue) {
-        let alive_pixel: [u8; 4] = [255, 255, 255, 255];
-
-        queue.write_texture(
-            wgpu::TexelCopyTextureInfo {
-                texture: &self.texture,
-                mip_level: 0,
-                origin: wgpu::Origin3d {
-                    x,
-                    y,
-                    z: 0,
-                },
-                aspect: wgpu::TextureAspect::All,
-            },
-            &alive_pixel,
-            wgpu::TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(4),
-                rows_per_image: Some(1),
-            },
-            wgpu::Extent3d {
-                width: 1,
-                height: 1,
-                depth_or_array_layers: 1,
-            }
-        );
-    }
-}
-
 pub struct State {
     surface: wgpu::Surface<'static>,
     device: wgpu::Device,
@@ -115,13 +24,7 @@ pub struct State {
     window: Arc<Window>,
     render_pipeline: wgpu::RenderPipeline,
     compute_pipeline: wgpu::ComputePipeline,
-    grid_a: Grid,
-    grid_b: Grid,
-    use_bind_group_a: bool,
-    render_bind_group_a: wgpu::BindGroup,
-    render_bind_group_b: wgpu::BindGroup,
-    compute_bind_group_a: wgpu::BindGroup,
-    compute_bind_group_b: wgpu::BindGroup,
+    grid: grid::Grid,
     update_simulation: bool,
 }
 
@@ -186,164 +89,66 @@ impl State {
             color_space: wgpu::SurfaceColorSpace::Auto,
         };
 
-        
-        let grid_dimensions = (256, 256);
-        let texture_size = wgpu::Extent3d {
-            width: grid_dimensions.0,
-            height: grid_dimensions.1,
-            depth_or_array_layers: 1,
-        };
-        let texture_desc = wgpu::TextureDescriptor {
-            label: Some("Grid Texture Descriptor"),
-            size: texture_size,
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba8Unorm,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING |
-            wgpu::TextureUsages::STORAGE_BINDING |
-            wgpu::TextureUsages::COPY_DST,
-            view_formats: &[]
-        };
-        // We need two textures for the compute shader, the texture A is the current grid state and the texture B is the future grid state after updating the grid
-        let texture_a = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("Texture A"),
-            ..texture_desc
-        });
-        let texture_b = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("Texture B"),
-            ..texture_desc
-        });
-        let view_a = texture_a.create_view(&wgpu::TextureViewDescriptor::default());
-        let view_b = texture_b.create_view(&wgpu::TextureViewDescriptor::default());
-        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-            label: Some("Grid Sampler"),
-            address_mode_u: wgpu::AddressMode::ClampToEdge,
-            address_mode_v: wgpu::AddressMode::ClampToEdge,
-            address_mode_w: wgpu::AddressMode::ClampToEdge,
-            mag_filter: wgpu::FilterMode::Nearest,
-            min_filter: wgpu::FilterMode::Nearest,
-            mipmap_filter: wgpu::MipmapFilterMode::Nearest,
-            ..Default::default()
-        });
-        let grid_a = Grid {
-            texture: texture_a,
-            view: view_a,
-            sampler: sampler.clone()
-        };
-        let grid_b = Grid {
-            texture: texture_b,
-            view: view_b,
-            sampler: sampler
-        };
-        
-        grid_a.random_grid(&queue);
-        
-        let render_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("Render Bind Group Layout"),
-            entries: &[
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        multisampled: false,
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                    count: None,
-                },
-                ]
-            });
-            let render_bind_group_a = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("Render Bind Group"),
-                layout: &render_bind_group_layout,
+        let render_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("Render Bind Group Layout"),
                 entries: &[
-                    wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&grid_a.view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::Sampler(&grid_a.sampler),
-                }
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            multisampled: false,
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        count: None,
+                    },
                 ],
-        });
-        let render_bind_group_b = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("Render Bind Group"),
-            layout: &render_bind_group_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&grid_b.view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::Sampler(&grid_b.sampler),
-                }
-            ],
-        });
-
-        let compute_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("Compute Bind Group Layout"),
-            entries: &[
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::Texture {
-                        multisampled: false,
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        sample_type: wgpu::TextureSampleType::Float { filterable: false }
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::StorageTexture {
-                        access: wgpu::StorageTextureAccess::WriteOnly,
-                        format: wgpu::TextureFormat::Rgba8Unorm,
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                    },
-                    count: None,
-                },
-            ]
-        });
-
-        let compute_bind_group_a = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("Compute Bind Group"),
-            layout: &compute_bind_group_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&grid_a.view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::TextureView(&grid_b.view),
-                },
-            ]
-        });
-        let compute_bind_group_b = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("Compute Bind Group"),
-            layout: &compute_bind_group_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&grid_b.view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::TextureView(&grid_a.view),
-                },
-                ]
             });
-            
+
+        let compute_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("Compute Bind Group Layout"),
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Texture {
+                            multisampled: false,
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::StorageTexture {
+                            access: wgpu::StorageTextureAccess::WriteOnly,
+                            format: wgpu::TextureFormat::Rgba8Unorm,
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                        },
+                        count: None,
+                    },
+                ],
+            });
+
+        let grid = grid::Grid::new(
+            //(size.width / 10, size.height / 10),
+            (256, 256),
+            &device,
+            &render_bind_group_layout,
+            &compute_bind_group_layout,
+        );
+
+        grid.random_grid(&queue);
+
         let render_shader = device.create_shader_module(wgpu::include_wgsl!("render.wgsl"));
         let render_pipeline_layout = {
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -416,13 +221,7 @@ impl State {
             window,
             render_pipeline,
             compute_pipeline,
-            grid_a,
-            grid_b,
-            use_bind_group_a: true,
-            render_bind_group_a,
-            render_bind_group_b,
-            compute_bind_group_a,
-            compute_bind_group_b,
+            grid,
             update_simulation: false,
         })
     }
@@ -456,13 +255,10 @@ impl State {
         if self.update_simulation {
             let mut encoder = self.device.create_command_encoder(&Default::default());
 
-            let bind_group = match self.use_bind_group_a {
-                true => &self.compute_bind_group_a,
-                false => &self.compute_bind_group_b,
-            };
-            
+            let bind_group = self.grid.get_compute_bind_group();
+
             let (workgroup_x, workgroup_y) = {
-                let size = self.grid_a.texture.size();
+                let size = self.grid.get_grid_size();
                 ((size.width + 7) / 8, (size.height + 7) / 8)
             };
 
@@ -473,10 +269,11 @@ impl State {
                 pass.dispatch_workgroups(workgroup_x, workgroup_y, 1);
             }
 
-            self.use_bind_group_a = !self.use_bind_group_a;
-            self.update_simulation = false;
+            self.grid.increase_generation();
 
             self.queue.submit(std::iter::once(encoder.finish()));
+
+            self.update_simulation = false;
         }
     }
 
@@ -512,10 +309,7 @@ impl State {
                 label: Some("Render Encoder"),
             });
 
-        let bind_group = match self.use_bind_group_a {
-            true => &self.render_bind_group_a,
-            false => &self.render_bind_group_b,
-        };
+        let bind_group = self.grid.get_render_bind_group();
 
         {
             let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -539,7 +333,7 @@ impl State {
                 timestamp_writes: None,
                 multiview_mask: None,
             });
-            
+
             render_pass.set_pipeline(&self.render_pipeline);
             render_pass.set_bind_group(0, bind_group, &[]);
             render_pass.draw(0..3, 0..1);
@@ -614,7 +408,12 @@ impl ApplicationHandler<State> for App {
         }
     }
 
-    fn user_event(&mut self, _event_loop: &ActiveEventLoop, mut event: State) {
+    fn user_event(
+        &mut self,
+        _event_loop: &ActiveEventLoop,
+        #[cfg(target_arch = "wasm32")] mut event: State,
+        #[cfg(not(target_arch = "wasm32"))] event: State,
+    ) {
         #[cfg(target_arch = "wasm32")]
         {
             event.window.request_redraw();
@@ -659,7 +458,10 @@ impl ApplicationHandler<State> for App {
                     },
                 ..
             } => state.handle_key(event_loop, code, key_state.is_pressed()),
-            WindowEvent::Touch(touch) => state.handle_touch(touch.phase == winit::event::TouchPhase::Started || touch.phase == winit::event::TouchPhase::Moved),
+            WindowEvent::Touch(touch) => state.handle_touch(
+                touch.phase == winit::event::TouchPhase::Started
+                    || touch.phase == winit::event::TouchPhase::Moved,
+            ),
             _ => {}
         }
     }
