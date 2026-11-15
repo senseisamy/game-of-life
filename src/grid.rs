@@ -1,5 +1,5 @@
 const ALIVE_COLOR: [u8; 4] = [255; 4];
-const DEAD_COLOR: [u8; 4] = [0, 0, 0, 255];
+const DEAD_COLOR: [u8; 4] = [15, 15, 15, 255];
 
 pub struct Grid {
     texture_a: wgpu::Texture,

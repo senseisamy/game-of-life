@@ -26,6 +26,9 @@ pub struct State {
     compute_pipeline: wgpu::ComputePipeline,
     grid: grid::Grid,
     update_simulation: bool,
+    egui_ctx: egui::Context,
+    egui_winit: egui_winit::State,
+    egui_wgpu: egui_wgpu::Renderer,
 }
 
 impl State {
@@ -74,7 +77,7 @@ impl State {
         let surface_format = surface_caps
             .formats
             .iter()
-            .find(|f| f.is_srgb())
+            .find(|f| !f.is_srgb())
             .copied()
             .unwrap_or(surface_caps.formats[0]);
         let config = wgpu::SurfaceConfiguration {
@@ -212,6 +215,21 @@ impl State {
             cache: Default::default(),
         });
 
+        let egui_ctx = egui::Context::default();
+        let egui_winit = egui_winit::State::new(
+            egui_ctx.clone(),
+            egui::ViewportId::ROOT,
+            &window,
+            Some(window.scale_factor() as f32),
+            None,
+            None,
+        );
+        let egui_wgpu = egui_wgpu::Renderer::new(
+            &device,
+            config.format,
+            egui_wgpu::RendererOptions::default(),
+        );
+
         Ok(Self {
             surface,
             device,
@@ -223,6 +241,9 @@ impl State {
             compute_pipeline,
             grid,
             update_simulation: false,
+            egui_ctx,
+            egui_winit,
+            egui_wgpu,
         })
     }
 
@@ -277,6 +298,38 @@ impl State {
         }
     }
 
+    pub fn build_ui(&mut self, command_encoder: &mut wgpu::CommandEncoder) -> (Vec<egui::ClippedPrimitive>, egui_wgpu::ScreenDescriptor, egui::TexturesDelta) {
+        let raw_inputs = self.egui_winit.take_egui_input(&self.window);
+        self.egui_ctx.begin_pass(raw_inputs);
+
+        egui::Window::new("TESTT").show(&self.egui_ctx, |ui| {
+            if ui.button("Clear grid").clicked() {
+                self.grid.clear(&self.queue);
+            }
+            if ui.button("Randomize grid").clicked() {
+                self.grid.random_grid(&self.queue);
+            }
+        });
+
+        let full_output = self.egui_ctx.end_pass();
+        self.egui_winit.handle_platform_output(&self.window, full_output.platform_output);
+        let paint_jobs = self.egui_ctx.tessellate(full_output.shapes, self.window.scale_factor() as f32);
+
+        let screen_descriptor = egui_wgpu::ScreenDescriptor {
+            size_in_pixels: [self.config.width, self.config.height],
+            pixels_per_point: self.window.scale_factor() as f32,
+        };
+
+        for (id, image_delta) in &full_output.textures_delta.set {
+            for delta in image_delta {
+                self.egui_wgpu.update_texture(&self.device, &self.queue, *id, delta);
+            }
+        }
+        self.egui_wgpu.update_buffers(&self.device, &self.queue, command_encoder, &paint_jobs, &screen_descriptor);
+
+        (paint_jobs, screen_descriptor, full_output.textures_delta)
+    }
+
     pub fn render(&mut self) -> anyhow::Result<()> {
         self.window.request_redraw();
 
@@ -309,25 +362,29 @@ impl State {
                 label: Some("Render Encoder"),
             });
 
-        let bind_group = self.grid.get_render_bind_group();
+        let (paint_jobs, screen_descriptor, mut textures_delta) = self.build_ui(&mut encoder);
 
+        // game pass
+        let bind_group = self.grid.get_render_bind_group();
         {
+            let game_color_attachments = [Some(wgpu::RenderPassColorAttachment {
+                view: &view,
+                resolve_target: None,
+                depth_slice: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color {
+                        r: 0.1,
+                        g: 0.2,
+                        b: 0.3,
+                        a: 1.0,
+                    }),
+                    store: wgpu::StoreOp::Store,
+                },
+            })];
+
             let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("Render Pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view,
-                    resolve_target: None,
-                    depth_slice: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: 0.1,
-                            g: 0.2,
-                            b: 0.3,
-                            a: 1.0,
-                        }),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
+                label: Some("Game Pass"),
+                color_attachments: &game_color_attachments,
                 depth_stencil_attachment: None,
                 occlusion_query_set: None,
                 timestamp_writes: None,
@@ -339,8 +396,36 @@ impl State {
             render_pass.draw(0..3, 0..1);
         }
 
+        // egui pass
+        {   
+            let ui_color_attachments = [Some(wgpu::RenderPassColorAttachment {
+                view: &view,
+                resolve_target: None,
+                depth_slice: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Load,
+                    store: wgpu::StoreOp::Store,
+                },
+            })];
+
+            let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("UI Pass"),
+                color_attachments: &ui_color_attachments,
+                depth_stencil_attachment: None,
+                occlusion_query_set: None,
+                timestamp_writes: None,
+                multiview_mask: None,
+            }).forget_lifetime();
+            self.egui_wgpu.render(&mut render_pass, &paint_jobs, &screen_descriptor);
+        }
+
         self.queue.submit(std::iter::once(encoder.finish()));
         self.queue.present(output);
+
+        for id in &textures_delta.free {
+            self.egui_wgpu.free_texture(id);
+        }
+        textures_delta.clear();
 
         Ok(())
     }
@@ -435,6 +520,26 @@ impl ApplicationHandler<State> for App {
             Some(canvas) => canvas,
             None => return,
         };
+
+        let ui_event_response = state.egui_winit.on_window_event(&state.window, &event);
+        if ui_event_response.consumed {
+            match event {
+                WindowEvent::CloseRequested => event_loop.exit(),
+                WindowEvent::Resized(size) => state.resize(size.width, size.height),
+                WindowEvent::RedrawRequested => {
+                    state.update();
+                    match state.render() {
+                        Ok(_) => (),
+                        Err(e) => {
+                            log::error!("{e}");
+                            event_loop.exit();
+                        }
+                    }
+                }
+                _ => ()
+            }
+            return;
+        }
 
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),

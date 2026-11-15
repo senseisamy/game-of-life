@@ -34,13 +34,14 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         cell(x - 1, y + 1) + cell(x, y + 1) + cell(x + 1, y + 1);
 
     let is_alive = cell(x, y) == 1;
-    var next_state = 0;
+    var next_state = 15.0 / 255.0;
     if is_alive && neighbors == 2 {
-        next_state = 1;
+        next_state = 1.0;
     } else if neighbors == 3 {
-        next_state = 1;
+        next_state = 1.0;
     }
 
-    let color = f32(next_state);
+    let color = next_state;
+
     textureStore(grid_out, vec2<i32>(x, y), vec4<f32>(color, color, color, 1.0));
 }
