@@ -2,18 +2,74 @@ mod grid;
 
 use std::sync::Arc;
 
+use web_time::Instant;
+
 use winit::{
-    application::ApplicationHandler,
-    event::{KeyEvent, WindowEvent},
-    event_loop::{ActiveEventLoop, EventLoop},
-    keyboard::{KeyCode, PhysicalKey},
-    window::Window,
+    application::ApplicationHandler, event::{KeyEvent, MouseButton, WindowEvent}, event_loop::{ActiveEventLoop, EventLoop}, keyboard::{KeyCode, PhysicalKey}, window::Window,
 };
 
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::prelude::*;
 #[cfg(target_arch = "wasm32")]
 use winit::platform::web::EventLoopExtWebSys;
+
+enum SimulationState {
+    Running,
+    AdvanceOnce,
+    Stopped
+}
+
+struct TimeInfo {
+    pub delta_time: f32,
+    pub avg_fps: f32,
+    time: Instant,
+    generation_time: Instant,
+    dt_sum: f32,
+    frame_count: f32,
+}
+
+impl TimeInfo {
+    pub fn new() -> Self {
+        Self {
+            delta_time: 0.0,
+            avg_fps: 0.0,
+            time: Instant::now(),
+            generation_time: Instant::now(),
+            dt_sum: 0.0,
+            frame_count: 0.0,
+        }
+    }
+
+    pub fn update(&mut self) {
+        self.delta_time = self.time.elapsed().as_secs_f32();
+        self.time = Instant::now();
+
+        self.dt_sum += self.delta_time;
+        self.frame_count += 1.0;
+        if self.dt_sum > 1.0 {
+            self.avg_fps = self.frame_count / self.dt_sum;
+            self.frame_count = 0.0;
+            self.dt_sum = 0.0;
+        }
+    }
+
+    pub fn new_generation(&mut self, generation_per_second: u32) -> bool {
+        if self.generation_time.elapsed().as_secs_f32() > 1.0 / generation_per_second as f32 {
+            self.generation_time = Instant::now();
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn get_delta_time(&self) -> f32 {
+        self.delta_time
+    }
+
+    pub fn get_fps(&self) -> f32 {
+        self.avg_fps
+    }
+}
 
 pub struct State {
     surface: wgpu::Surface<'static>,
@@ -25,7 +81,11 @@ pub struct State {
     render_pipeline: wgpu::RenderPipeline,
     compute_pipeline: wgpu::ComputePipeline,
     grid: grid::Grid,
-    update_simulation: bool,
+    //update_simulation: bool,
+    simulation_state: SimulationState,
+    generation_per_second: u32,
+    time_info: TimeInfo,
+    cursor_position: winit::dpi::PhysicalPosition<f64>,
     egui_ctx: egui::Context,
     egui_winit: egui_winit::State,
     egui_wgpu: egui_wgpu::Renderer,
@@ -144,7 +204,7 @@ impl State {
 
         let grid = grid::Grid::new(
             //(size.width / 10, size.height / 10),
-            (256, 256),
+            (128, 128),
             &device,
             &render_bind_group_layout,
             &compute_bind_group_layout,
@@ -215,6 +275,14 @@ impl State {
             cache: Default::default(),
         });
 
+        let simulation_state = SimulationState::Stopped;
+
+        let generation_per_second = 2;
+
+        let time_info = TimeInfo::new();
+
+        let cursor_position = winit::dpi::PhysicalPosition::new(0.0, 0.0);
+
         let egui_ctx = egui::Context::default();
         let egui_winit = egui_winit::State::new(
             egui_ctx.clone(),
@@ -240,7 +308,11 @@ impl State {
             render_pipeline,
             compute_pipeline,
             grid,
-            update_simulation: false,
+            //update_simulation: false,
+            simulation_state,
+            generation_per_second,
+            time_info,
+            cursor_position,
             egui_ctx,
             egui_winit,
             egui_wgpu,
@@ -261,40 +333,70 @@ impl State {
     pub fn handle_key(&mut self, event_loop: &ActiveEventLoop, code: KeyCode, is_pressed: bool) {
         match (code, is_pressed) {
             (KeyCode::Escape, true) => event_loop.exit(),
-            (KeyCode::Space, true) => self.update_simulation = true,
+            (KeyCode::Space, true) => self.simulation_state = SimulationState::AdvanceOnce,
+            (KeyCode::ArrowRight, true) => self.simulation_state = SimulationState::Running,
+            (KeyCode::ArrowLeft, true) => self.simulation_state = SimulationState::Stopped,
             _ => (),
         }
     }
 
     pub fn handle_touch(&mut self, is_screen_touched: bool) {
         if is_screen_touched {
-            self.update_simulation = true;
+            self.simulation_state = SimulationState::AdvanceOnce;
         }
     }
 
-    pub fn update(&mut self) {
-        if self.update_simulation {
-            let mut encoder = self.device.create_command_encoder(&Default::default());
+    pub fn handle_mouse(&mut self, button: MouseButton, _is_pressed: bool) {
+        match button {
+            MouseButton::Left => {
+                let grid_size = self.grid.get_grid_size();
 
-            let bind_group = self.grid.get_compute_bind_group();
+                let x = (self.cursor_position.x / self.config.width as f64 * grid_size.width as f64) as u32;
+                let y = (self.cursor_position.y / self.config.height as f64 * grid_size.height as f64) as u32;
 
-            let (workgroup_x, workgroup_y) = {
-                let size = self.grid.get_grid_size();
-                ((size.width + 7) / 8, (size.height + 7) / 8)
-            };
-
-            {
-                let mut pass = encoder.begin_compute_pass(&Default::default());
-                pass.set_pipeline(&self.compute_pipeline);
-                pass.set_bind_group(0, bind_group, &[]);
-                pass.dispatch_workgroups(workgroup_x, workgroup_y, 1);
+                if x < grid_size.width && y < grid_size.height {
+                    self.grid.set_cell_alive(x, y, &self.queue);
+                    self.window.request_redraw();
+                }
             }
+            _ => {}
+        }
+    }
 
-            self.grid.increase_generation();
+    pub fn calculate_simulation(&mut self) {
+        let mut encoder = self.device.create_command_encoder(&Default::default());
 
-            self.queue.submit(std::iter::once(encoder.finish()));
+        let bind_group = self.grid.get_compute_bind_group();
 
-            self.update_simulation = false;
+        let (workgroup_x, workgroup_y) = {
+            let size = self.grid.get_grid_size();
+            ((size.width + 7) / 8, (size.height + 7) / 8)
+        };
+
+        {
+            let mut pass = encoder.begin_compute_pass(&Default::default());
+            pass.set_pipeline(&self.compute_pipeline);
+            pass.set_bind_group(0, bind_group, &[]);
+            pass.dispatch_workgroups(workgroup_x, workgroup_y, 1);
+        }
+
+        self.grid.increase_generation();
+
+        self.queue.submit(std::iter::once(encoder.finish()));
+    }
+
+    pub fn update(&mut self) {
+        match self.simulation_state {
+            SimulationState::AdvanceOnce => {
+                self.calculate_simulation();
+                self.simulation_state = SimulationState::Stopped;
+            }
+            SimulationState::Running => {
+                if self.time_info.new_generation(self.generation_per_second) {
+                    self.calculate_simulation();
+                }
+            }
+            SimulationState::Stopped => {},
         }
     }
 
@@ -302,7 +404,7 @@ impl State {
         let raw_inputs = self.egui_winit.take_egui_input(&self.window);
         self.egui_ctx.begin_pass(raw_inputs);
 
-        egui::Window::new("TESTT").show(&self.egui_ctx, |ui| {
+        egui::Window::new("Grid").show(&self.egui_ctx, |ui| {
             if ui.button("Clear grid").clicked() {
                 self.grid.clear(&self.queue);
             }
@@ -310,6 +412,37 @@ impl State {
                 self.grid.random_grid(&self.queue);
             }
         });
+
+        egui::Window::new("Fps")
+            .title_bar(false)
+            .anchor(egui::Align2::RIGHT_TOP, [-10.0, 10.0])
+            .show(&self.egui_ctx, |ui| {
+                ui.label(
+                    egui::RichText::new(format!("FPS: {}", self.time_info.avg_fps as i32))
+                )
+            });
+
+        let (play_button, next_state) = match self.simulation_state {
+            SimulationState::Running { .. } => ("|| Pause", SimulationState::Stopped),
+            SimulationState::Stopped | SimulationState::AdvanceOnce => ("> Play", SimulationState::Running),
+        };
+        let mut generation_per_second = self.generation_per_second;
+        egui::Window::new("Controls")
+            .title_bar(false)
+            .anchor(egui::Align2::CENTER_BOTTOM, [0.0, -10.0])
+            .show(&self.egui_ctx, |ui| {
+                ui.horizontal(|ui| {
+                    if ui.button(play_button).clicked() {
+                        self.simulation_state = next_state;
+                    }
+                    ui.add(
+                        egui::Slider::new(&mut generation_per_second, 1..=100)
+                        .orientation(egui::SliderOrientation::Horizontal)
+                        //.text("generation per second")
+                    );
+                })
+            });
+        self.generation_per_second = generation_per_second;
 
         let full_output = self.egui_ctx.end_pass();
         self.egui_winit.handle_platform_output(&self.window, full_output.platform_output);
@@ -426,6 +559,8 @@ impl State {
             self.egui_wgpu.free_texture(id);
         }
         textures_delta.clear();
+
+        self.time_info.update();
 
         Ok(())
     }
@@ -563,6 +698,8 @@ impl ApplicationHandler<State> for App {
                     },
                 ..
             } => state.handle_key(event_loop, code, key_state.is_pressed()),
+            WindowEvent::CursorMoved { position, .. } => state.cursor_position = position,
+            WindowEvent::MouseInput { state: mouse_state, button, .. } => state.handle_mouse(button, mouse_state.is_pressed()),
             WindowEvent::Touch(touch) => state.handle_touch(
                 touch.phase == winit::event::TouchPhase::Started
                     || touch.phase == winit::event::TouchPhase::Moved,
