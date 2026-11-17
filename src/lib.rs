@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use web_time::Instant;
 
+use wgpu::util::DeviceExt;
 use winit::{
     application::ApplicationHandler, event::{KeyEvent, MouseButton, WindowEvent}, event_loop::{ActiveEventLoop, EventLoop}, keyboard::{KeyCode, PhysicalKey}, window::Window,
 };
@@ -26,6 +27,13 @@ struct TimeInfo {
     generation_time: Instant,
     dt_sum: f32,
     frame_count: f32,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+struct CameraUniform {
+    pub offset: [f32; 2],
+    pub scale: [f32; 2],
 }
 
 impl TimeInfo {
@@ -86,6 +94,10 @@ pub struct State {
     generation_per_second: u32,
     time_info: TimeInfo,
     cursor_position: winit::dpi::PhysicalPosition<f64>,
+    camera: CameraUniform,
+    camera_buffer: wgpu::Buffer,
+    camera_bind_group: wgpu::BindGroup,
+    is_panning: bool,
     egui_ctx: egui::Context,
     egui_winit: egui_winit::State,
     egui_wgpu: egui_wgpu::Renderer,
@@ -203,8 +215,7 @@ impl State {
             });
 
         let grid = grid::Grid::new(
-            //(size.width / 10, size.height / 10),
-            (128, 128),
+            (512, 512),
             &device,
             &render_bind_group_layout,
             &compute_bind_group_layout,
@@ -212,11 +223,51 @@ impl State {
 
         grid.random_grid(&queue);
 
+
+        let simulation_state = SimulationState::Stopped;
+
+        let generation_per_second = 2;
+
+        let time_info = TimeInfo::new();
+
+        let cursor_position = winit::dpi::PhysicalPosition::new(0.0, 0.0);
+
+        let camera = CameraUniform {
+            offset: [0.0, 0.0],
+            scale: [2.0, 2.0],
+        };
+        let camera_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Camera Buffer"),
+            contents: bytemuck::cast_slice(&[camera]),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+        let camera_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("Camera Bind Group Layout"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::VERTEX,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            }]
+        });
+        let camera_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Camera Bind Group"),
+            layout: &camera_bind_group_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: camera_buffer.as_entire_binding(),
+            }]
+        });
+
         let render_shader = device.create_shader_module(wgpu::include_wgsl!("render.wgsl"));
         let render_pipeline_layout = {
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("Render Pipeline Layout"),
-                bind_group_layouts: &[Some(&render_bind_group_layout)],
+                bind_group_layouts: &[Some(&render_bind_group_layout), Some(&camera_bind_group_layout)],
                 immediate_size: 0,
             })
         };
@@ -275,14 +326,6 @@ impl State {
             cache: Default::default(),
         });
 
-        let simulation_state = SimulationState::Stopped;
-
-        let generation_per_second = 2;
-
-        let time_info = TimeInfo::new();
-
-        let cursor_position = winit::dpi::PhysicalPosition::new(0.0, 0.0);
-
         let egui_ctx = egui::Context::default();
         let egui_winit = egui_winit::State::new(
             egui_ctx.clone(),
@@ -308,10 +351,13 @@ impl State {
             render_pipeline,
             compute_pipeline,
             grid,
-            //update_simulation: false,
             simulation_state,
             generation_per_second,
             time_info,
+            camera,
+            camera_buffer,
+            camera_bind_group,
+            is_panning: false,
             cursor_position,
             egui_ctx,
             egui_winit,
@@ -346,21 +392,74 @@ impl State {
         }
     }
 
-    pub fn handle_mouse(&mut self, button: MouseButton, _is_pressed: bool) {
+    pub fn handle_mouse(&mut self, button: MouseButton, mouse_state: winit::event::ElementState) {
         match button {
             MouseButton::Left => {
                 let grid_size = self.grid.get_grid_size();
 
-                let x = (self.cursor_position.x / self.config.width as f64 * grid_size.width as f64) as u32;
-                let y = (self.cursor_position.y / self.config.height as f64 * grid_size.height as f64) as u32;
+                // let x = (self.cursor_position.x / self.config.width as f64 * grid_size.width as f64) as u32;
+                // let y = (self.cursor_position.y / self.config.height as f64 * grid_size.height as f64) as u32;
+                let width = self.config.width as f64;
+                let height = self.config.height as f64;
 
-                if x < grid_size.width && y < grid_size.height {
-                    self.grid.set_cell_alive(x, y, &self.queue);
+                let ndc_x = (self.cursor_position.x / width) * 2.0 - 1.0;
+                let ndc_y = 1.0 - (self.cursor_position.y / height) * 2.0;
+
+                let pos_x = (ndc_x - self.camera.offset[0] as f64) / self.camera.scale[0] as f64;
+                let pos_y = (ndc_y - self.camera.offset[1] as f64) / self.camera.scale[1] as f64;
+
+                let uv_x = (pos_x + 1.0) / 2.0;
+                let uv_y = (1.0 - pos_y) / 2.0;
+
+                let x = (uv_x * grid_size.width as f64).floor();
+                let y = (uv_y * grid_size.height as f64).floor();
+
+                if x >= 0.0 && y >= 0.0 && x < grid_size.width as f64 && y < grid_size.height as f64 {
+                    self.grid.set_cell_alive(x as u32, y as u32, &self.queue);
                     self.window.request_redraw();
                 }
             }
+            MouseButton::Right => {
+                self.is_panning = mouse_state == winit::event::ElementState::Pressed;
+            }
             _ => {}
         }
+    }
+
+    pub fn handle_mouse_mouvement(&mut self, position: winit::dpi::PhysicalPosition<f64>) {
+        let old_pos = self.cursor_position;
+        self.cursor_position = position;
+
+        if self.is_panning {
+            let dx = (position.x - old_pos.x) as f32;
+            let dy = (position.y - old_pos.y) as f32;
+
+            self.camera.offset[0] += (dx / self.config.width as f32) * 2.0;
+            self.camera.offset[1] -= (dy / self.config.height as f32) * 2.0;
+
+            self.queue.write_buffer(&self.camera_buffer, 0, bytemuck::cast_slice(&[self.camera]));
+            self.window.request_redraw();
+        }
+    }
+
+    pub fn handle_mouse_wheel(&mut self, delta: winit::event::MouseScrollDelta) {
+        let zoom = match delta {
+            winit::event::MouseScrollDelta::LineDelta(_, y) => {
+                let zoom = y * 0.1;
+                self.camera.scale[0] += zoom;
+                self.camera.scale[1] += zoom;
+            }
+            winit::event::MouseScrollDelta::PixelDelta(pos) => {
+                let dx = pos.x as f32;
+                let dy = pos.y as f32;
+
+                self.camera.offset[0] += (dx / self.config.width as f32) * 2.0;
+                self.camera.offset[1] -= (dy / self.config.height as f32) * 2.0;
+            },
+        };
+
+        self.queue.write_buffer(&self.camera_buffer, 0, bytemuck::cast_slice(&[self.camera]));
+        self.window.request_redraw();
     }
 
     pub fn calculate_simulation(&mut self) {
@@ -498,7 +597,7 @@ impl State {
         let (paint_jobs, screen_descriptor, mut textures_delta) = self.build_ui(&mut encoder);
 
         // game pass
-        let bind_group = self.grid.get_render_bind_group();
+        let grid_bind_group = self.grid.get_render_bind_group();
         {
             let game_color_attachments = [Some(wgpu::RenderPassColorAttachment {
                 view: &view,
@@ -525,7 +624,8 @@ impl State {
             });
 
             render_pass.set_pipeline(&self.render_pipeline);
-            render_pass.set_bind_group(0, bind_group, &[]);
+            render_pass.set_bind_group(0, grid_bind_group, &[]);
+            render_pass.set_bind_group(1, &self.camera_bind_group, &[]);
             render_pass.draw(0..3, 0..1);
         }
 
@@ -698,12 +798,13 @@ impl ApplicationHandler<State> for App {
                     },
                 ..
             } => state.handle_key(event_loop, code, key_state.is_pressed()),
-            WindowEvent::CursorMoved { position, .. } => state.cursor_position = position,
-            WindowEvent::MouseInput { state: mouse_state, button, .. } => state.handle_mouse(button, mouse_state.is_pressed()),
+            WindowEvent::MouseInput { state: mouse_state, button, .. } => state.handle_mouse(button, mouse_state),
             WindowEvent::Touch(touch) => state.handle_touch(
                 touch.phase == winit::event::TouchPhase::Started
                     || touch.phase == winit::event::TouchPhase::Moved,
             ),
+            WindowEvent::CursorMoved { position, .. } => state.handle_mouse_mouvement(position),
+            WindowEvent::MouseWheel { delta, .. } => state.handle_mouse_wheel(delta),
             _ => {}
         }
     }

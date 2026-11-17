@@ -3,6 +3,13 @@ struct VertexOutput {
     @location(0) uv: vec2<f32>,
 };
 
+struct CameraUniform {
+    offset: vec2<f32>,
+    scale: f32
+};
+
+@group(1) @binding(0) var<uniform> camera: CameraUniform;
+
 @vertex
 fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOutput {
     var out: VertexOutput;
@@ -25,14 +32,14 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOutput {
     //     vec2<f32>(0.5, -0.5), // right
     // );
 
-    out.position = vec4<f32>(clip_positions[vertex_index], 0.0, 1.0);
+    out.position = vec4<f32>(clip_positions[vertex_index] * vec2<f32>(camera.scale) + camera.offset , 0.0, 1.0);
     out.uv = uvs[vertex_index];
 
     return out;
 }
 
-@binding(0) @group(0) var t_grid: texture_2d<f32>;
-@binding(1) @group(0) var s_grid: sampler;
+@group(0) @binding(0)  var t_grid: texture_2d<f32>;
+@group(0) @binding(1) var s_grid: sampler;
 
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
