@@ -459,15 +459,13 @@ impl State {
                 let width = self.config.width as f64;
                 let height = self.config.height as f64;
 
-                let aspect_ratio = height / width;
-
                 let ndc_x = (self.cursor_position.x / width) * 2.0 - 1.0;
                 let ndc_y = 1.0 - (self.cursor_position.y / height) * 2.0;
 
                 let pos_x = (ndc_x - self.camera.camera_uniform.offset[0] as f64)
                     / self.camera.camera_uniform.scale[0] as f64;
                 let pos_y = (ndc_y - self.camera.camera_uniform.offset[1] as f64)
-                    / (self.camera.camera_uniform.scale[1] as f64 * aspect_ratio);
+                    / (self.camera.camera_uniform.scale[1] as f64/* / aspect_ratio*/);
 
                 let uv_x = (pos_x + 1.0) / 2.0;
                 let uv_y = (1.0 - pos_y) / 2.0;
@@ -513,11 +511,8 @@ impl State {
                 self.apply_zoom(multiplier);
             }
             winit::event::MouseScrollDelta::PixelDelta(pos) => {
-                let dx = pos.x as f32;
-                let dy = pos.y as f32;
-
-                self.camera.camera_uniform.offset[0] += (dx / self.config.width as f32) * 2.0;
-                self.camera.camera_uniform.offset[1] -= (dy / self.config.height as f32) * 2.0;
+                let multiplier = 1.0 + (pos.y as f32 * 0.002);
+                self.apply_zoom(multiplier);
             }
         };
 
@@ -820,7 +815,9 @@ impl ApplicationHandler<State> for App {
             let document = window.document().unwrap_throw();
             let canvas = document.get_element_by_id(CANVAS_ID).unwrap_throw();
             let html_canvas_element = canvas.unchecked_into();
-            window_attributes = window_attributes.with_canvas(Some(html_canvas_element));
+            window_attributes = window_attributes
+                .with_prevent_default(true)
+                .with_canvas(Some(html_canvas_element));
         }
 
         let window = Arc::new(event_loop.create_window(window_attributes).unwrap());
