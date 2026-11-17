@@ -5,7 +5,8 @@ struct VertexOutput {
 
 struct CameraUniform {
     offset: vec2<f32>,
-    scale: f32
+    scale: vec2<f32>,
+    cell_color: vec4<f32>
 };
 
 @group(1) @binding(0) var<uniform> camera: CameraUniform;
@@ -32,7 +33,7 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOutput {
     //     vec2<f32>(0.5, -0.5), // right
     // );
 
-    out.position = vec4<f32>(clip_positions[vertex_index] * vec2<f32>(camera.scale) + camera.offset , 0.0, 1.0);
+    out.position = vec4<f32>(clip_positions[vertex_index] * camera.scale + camera.offset , 0.0, 1.0);
     out.uv = uvs[vertex_index];
 
     return out;
@@ -43,7 +44,8 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOutput {
 
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    return textureSample(t_grid, s_grid, in.uv);
+    let tex_color = textureSample(t_grid, s_grid, in.uv);
+    return tex_color * camera.cell_color;
 }
 
 // @fragment

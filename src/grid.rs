@@ -3,15 +3,13 @@ const DEAD_COLOR: [u8; 4] = [15, 15, 15, 255];
 
 pub struct Grid {
     texture_a: wgpu::Texture,
-    //view_a: wgpu::TextureView,
     render_bind_group_a: wgpu::BindGroup,
     compute_bind_group_a: wgpu::BindGroup,
     texture_b: wgpu::Texture,
-    //view_b: wgpu::TextureView,
     render_bind_group_b: wgpu::BindGroup,
     compute_bind_group_b: wgpu::BindGroup,
-    //sampler: wgpu::Sampler,
     generation: u64,
+    alive_cell_color: [u8; 4]
 }
 
 impl Grid {
@@ -120,15 +118,13 @@ impl Grid {
 
         Self {
             texture_a,
-            //view_a,
             render_bind_group_a,
             compute_bind_group_a,
             texture_b,
-            //view_b,
             render_bind_group_b,
             compute_bind_group_b,
-            //sampler,
             generation: 0,
+            alive_cell_color: ALIVE_COLOR,
         }
     }
 
@@ -181,7 +177,7 @@ impl Grid {
         for _ in 0..total_pixels {
             match rand::random_bool(0.2) {
                 // 20% of being true
-                true => data.extend_from_slice(&ALIVE_COLOR),
+                true => data.extend_from_slice(&self.alive_cell_color),
                 false => data.extend_from_slice(&DEAD_COLOR),
             }
         }
@@ -218,7 +214,7 @@ impl Grid {
                 origin: wgpu::Origin3d { x, y, z: 0 },
                 aspect: wgpu::TextureAspect::All,
             },
-            &ALIVE_COLOR,
+            &self.alive_cell_color,
             wgpu::TexelCopyBufferLayout {
                 offset: 0,
                 bytes_per_row: Some(4),

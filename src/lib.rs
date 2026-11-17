@@ -6,7 +6,11 @@ use web_time::Instant;
 
 use wgpu::util::DeviceExt;
 use winit::{
-    application::ApplicationHandler, event::{KeyEvent, MouseButton, WindowEvent}, event_loop::{ActiveEventLoop, EventLoop}, keyboard::{KeyCode, PhysicalKey}, window::Window,
+    application::ApplicationHandler,
+    event::{KeyEvent, MouseButton, WindowEvent},
+    event_loop::{ActiveEventLoop, EventLoop},
+    keyboard::{KeyCode, PhysicalKey},
+    window::Window,
 };
 
 #[cfg(target_arch = "wasm32")]
@@ -17,16 +21,7 @@ use winit::platform::web::EventLoopExtWebSys;
 enum SimulationState {
     Running,
     AdvanceOnce,
-    Stopped
-}
-
-struct TimeInfo {
-    pub delta_time: f32,
-    pub avg_fps: f32,
-    time: Instant,
-    generation_time: Instant,
-    dt_sum: f32,
-    frame_count: f32,
+    Stopped,
 }
 
 #[repr(C)]
@@ -34,7 +29,26 @@ struct TimeInfo {
 struct CameraUniform {
     pub offset: [f32; 2],
     pub scale: [f32; 2],
+    // tmp, this probably shouldnt be in camera
+    pub cell_color: [f32; 4],
 }
+
+struct Camera {
+    camera_uniform: CameraUniform,
+    camera_buffer: wgpu::Buffer,
+    camera_bind_group: wgpu::BindGroup,
+    zoom: f32,
+}
+
+struct TimeInfo {
+    delta_time: f32,
+    avg_fps: f32,
+    time: Instant,
+    generation_time: Instant,
+    dt_sum: f32,
+    frame_count: f32,
+}
+
 
 impl TimeInfo {
     pub fn new() -> Self {
@@ -70,6 +84,7 @@ impl TimeInfo {
         }
     }
 
+    #[allow(unused)]
     pub fn get_delta_time(&self) -> f32 {
         self.delta_time
     }
@@ -89,14 +104,11 @@ pub struct State {
     render_pipeline: wgpu::RenderPipeline,
     compute_pipeline: wgpu::ComputePipeline,
     grid: grid::Grid,
-    //update_simulation: bool,
     simulation_state: SimulationState,
     generation_per_second: u32,
     time_info: TimeInfo,
     cursor_position: winit::dpi::PhysicalPosition<f64>,
-    camera: CameraUniform,
-    camera_buffer: wgpu::Buffer,
-    camera_bind_group: wgpu::BindGroup,
+    camera: Camera,
     is_panning: bool,
     egui_ctx: egui::Context,
     egui_winit: egui_winit::State,
@@ -223,7 +235,6 @@ impl State {
 
         grid.random_grid(&queue);
 
-
         let simulation_state = SimulationState::Stopped;
 
         let generation_per_second = 2;
@@ -232,42 +243,57 @@ impl State {
 
         let cursor_position = winit::dpi::PhysicalPosition::new(0.0, 0.0);
 
-        let camera = CameraUniform {
+        let zoom = 2.0;
+        let aspect_ratio = size.height as f32 / size.width as f32;
+
+        let camera_uniform = CameraUniform {
             offset: [0.0, 0.0],
-            scale: [2.0, 2.0],
+            scale: [zoom * aspect_ratio, zoom],
+            cell_color: [1.0; 4],
         };
         let camera_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("Camera Buffer"),
-            contents: bytemuck::cast_slice(&[camera]),
+            contents: bytemuck::cast_slice(&[camera_uniform]),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
-        let camera_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("Camera Bind Group Layout"),
-            entries: &[wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::VERTEX,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
-                },
-                count: None,
-            }]
-        });
+        let camera_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("Camera Bind Group Layout"),
+                entries: &[wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                }],
+            });
         let camera_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("Camera Bind Group"),
             layout: &camera_bind_group_layout,
             entries: &[wgpu::BindGroupEntry {
                 binding: 0,
                 resource: camera_buffer.as_entire_binding(),
-            }]
+            }],
         });
+
+        let camera = Camera {
+            camera_uniform,
+            camera_buffer,
+            camera_bind_group,
+            zoom,
+        };
 
         let render_shader = device.create_shader_module(wgpu::include_wgsl!("render.wgsl"));
         let render_pipeline_layout = {
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("Render Pipeline Layout"),
-                bind_group_layouts: &[Some(&render_bind_group_layout), Some(&camera_bind_group_layout)],
+                bind_group_layouts: &[
+                    Some(&render_bind_group_layout),
+                    Some(&camera_bind_group_layout),
+                ],
                 immediate_size: 0,
             })
         };
@@ -355,8 +381,6 @@ impl State {
             generation_per_second,
             time_info,
             camera,
-            camera_buffer,
-            camera_bind_group,
             is_panning: false,
             cursor_position,
             egui_ctx,
@@ -367,13 +391,48 @@ impl State {
 
     pub fn resize(&mut self, width: u32, height: u32) {
         if width > 0 && height > 0 {
-            // webGL max is 2048
-            //let max = 2048;
-            self.config.width = width/*.min(max)*/;
-            self.config.height = height/*.min(max)*/;
+            self.config.width = width;
+            self.config.height = height;
             self.surface.configure(&self.device, &self.config);
             self.is_surface_configured = true;
+
+            let aspect_ratio = height as f32 / width as f32;
+            self.camera.camera_uniform.scale[0] = self.camera.zoom * aspect_ratio;
+            self.camera.camera_uniform.scale[1] = self.camera.zoom;
+
+            self.queue.write_buffer(
+                &self.camera.camera_buffer,
+                0,
+                bytemuck::cast_slice(&[self.camera.camera_uniform]),
+            );
         }
+    }
+
+    pub fn apply_zoom(&mut self, multiplier: f32) {
+        let width = self.config.width as f32;
+        let height = self.config.height as f32;
+
+        let ndc_x = (self.cursor_position.x as f32 / width) * 2.0 - 1.0;
+        let ndc_y = 1.0 - (self.cursor_position.y as f32 / height) * 2.0;
+
+        let new_zoom = (self.camera.zoom * multiplier).clamp(0.1, 50.0);
+        let actual_multiplier = new_zoom / self.camera.zoom;
+        self.camera.zoom = new_zoom;
+
+        self.camera.camera_uniform.offset[0] =
+            ndc_x - (ndc_x - self.camera.camera_uniform.offset[0]) * actual_multiplier;
+        self.camera.camera_uniform.offset[1] =
+            ndc_y - (ndc_y - self.camera.camera_uniform.offset[1]) * actual_multiplier;
+
+        let aspect_ratio = height / width;
+        self.camera.camera_uniform.scale = [self.camera.zoom * aspect_ratio, self.camera.zoom];
+
+        self.queue.write_buffer(
+            &self.camera.camera_buffer,
+            0,
+            bytemuck::cast_slice(&[self.camera.camera_uniform]),
+        );
+        self.window.request_redraw();
     }
 
     pub fn handle_key(&mut self, event_loop: &ActiveEventLoop, code: KeyCode, is_pressed: bool) {
@@ -392,21 +451,23 @@ impl State {
         }
     }
 
-    pub fn handle_mouse(&mut self, button: MouseButton, mouse_state: winit::event::ElementState) {
-        match button {
-            MouseButton::Left => {
+    pub fn handle_mouse(&mut self, button: MouseButton, is_pressed: bool) {
+        match (button, is_pressed) {
+            (MouseButton::Left, true) => {
                 let grid_size = self.grid.get_grid_size();
 
-                // let x = (self.cursor_position.x / self.config.width as f64 * grid_size.width as f64) as u32;
-                // let y = (self.cursor_position.y / self.config.height as f64 * grid_size.height as f64) as u32;
                 let width = self.config.width as f64;
                 let height = self.config.height as f64;
+
+                let aspect_ratio = height / width;
 
                 let ndc_x = (self.cursor_position.x / width) * 2.0 - 1.0;
                 let ndc_y = 1.0 - (self.cursor_position.y / height) * 2.0;
 
-                let pos_x = (ndc_x - self.camera.offset[0] as f64) / self.camera.scale[0] as f64;
-                let pos_y = (ndc_y - self.camera.offset[1] as f64) / self.camera.scale[1] as f64;
+                let pos_x = (ndc_x - self.camera.camera_uniform.offset[0] as f64)
+                    / self.camera.camera_uniform.scale[0] as f64;
+                let pos_y = (ndc_y - self.camera.camera_uniform.offset[1] as f64)
+                    / (self.camera.camera_uniform.scale[1] as f64 * aspect_ratio);
 
                 let uv_x = (pos_x + 1.0) / 2.0;
                 let uv_y = (1.0 - pos_y) / 2.0;
@@ -414,14 +475,13 @@ impl State {
                 let x = (uv_x * grid_size.width as f64).floor();
                 let y = (uv_y * grid_size.height as f64).floor();
 
-                if x >= 0.0 && y >= 0.0 && x < grid_size.width as f64 && y < grid_size.height as f64 {
+                if x >= 0.0 && y >= 0.0 && x < grid_size.width as f64 && y < grid_size.height as f64
+                {
                     self.grid.set_cell_alive(x as u32, y as u32, &self.queue);
                     self.window.request_redraw();
                 }
             }
-            MouseButton::Right => {
-                self.is_panning = mouse_state == winit::event::ElementState::Pressed;
-            }
+            (MouseButton::Right, is_pressed) => self.is_panning = is_pressed,
             _ => {}
         }
     }
@@ -434,31 +494,38 @@ impl State {
             let dx = (position.x - old_pos.x) as f32;
             let dy = (position.y - old_pos.y) as f32;
 
-            self.camera.offset[0] += (dx / self.config.width as f32) * 2.0;
-            self.camera.offset[1] -= (dy / self.config.height as f32) * 2.0;
+            self.camera.camera_uniform.offset[0] += (dx / self.config.width as f32) * 2.0;
+            self.camera.camera_uniform.offset[1] -= (dy / self.config.height as f32) * 2.0;
 
-            self.queue.write_buffer(&self.camera_buffer, 0, bytemuck::cast_slice(&[self.camera]));
+            self.queue.write_buffer(
+                &self.camera.camera_buffer,
+                0,
+                bytemuck::cast_slice(&[self.camera.camera_uniform]),
+            );
             self.window.request_redraw();
         }
     }
 
     pub fn handle_mouse_wheel(&mut self, delta: winit::event::MouseScrollDelta) {
-        let zoom = match delta {
+        match delta {
             winit::event::MouseScrollDelta::LineDelta(_, y) => {
-                let zoom = y * 0.1;
-                self.camera.scale[0] += zoom;
-                self.camera.scale[1] += zoom;
+                let multiplier = 1.0 + (y * 0.1);
+                self.apply_zoom(multiplier);
             }
             winit::event::MouseScrollDelta::PixelDelta(pos) => {
                 let dx = pos.x as f32;
                 let dy = pos.y as f32;
 
-                self.camera.offset[0] += (dx / self.config.width as f32) * 2.0;
-                self.camera.offset[1] -= (dy / self.config.height as f32) * 2.0;
-            },
+                self.camera.camera_uniform.offset[0] += (dx / self.config.width as f32) * 2.0;
+                self.camera.camera_uniform.offset[1] -= (dy / self.config.height as f32) * 2.0;
+            }
         };
 
-        self.queue.write_buffer(&self.camera_buffer, 0, bytemuck::cast_slice(&[self.camera]));
+        self.queue.write_buffer(
+            &self.camera.camera_buffer,
+            0,
+            bytemuck::cast_slice(&[self.camera.camera_uniform]),
+        );
         self.window.request_redraw();
     }
 
@@ -495,40 +562,81 @@ impl State {
                     self.calculate_simulation();
                 }
             }
-            SimulationState::Stopped => {},
+            SimulationState::Stopped => {}
         }
     }
 
-    pub fn build_ui(&mut self, command_encoder: &mut wgpu::CommandEncoder) -> (Vec<egui::ClippedPrimitive>, egui_wgpu::ScreenDescriptor, egui::TexturesDelta) {
+    pub fn build_ui(
+        &mut self,
+        command_encoder: &mut wgpu::CommandEncoder,
+    ) -> (
+        Vec<egui::ClippedPrimitive>,
+        egui_wgpu::ScreenDescriptor,
+        egui::TexturesDelta,
+    ) {
         let raw_inputs = self.egui_winit.take_egui_input(&self.window);
         self.egui_ctx.begin_pass(raw_inputs);
 
-        egui::Window::new("Grid").show(&self.egui_ctx, |ui| {
-            if ui.button("Clear grid").clicked() {
-                self.grid.clear(&self.queue);
-            }
-            if ui.button("Randomize grid").clicked() {
-                self.grid.random_grid(&self.queue);
-            }
-        });
+        let mut color = self.camera.camera_uniform.cell_color;
+        egui::Window::new("Menu")
+            .anchor(egui::Align2::LEFT_TOP, [10.0, 10.0])
+            .default_open(false)
+            .resizable(false)
+            //.min_width(0.0)
+            .default_width(0.0)
+            .show(&self.egui_ctx, |ui| {
+                egui::Grid::new("menu_grid")
+                    .num_columns(2)
+                    .spacing([15.0, 10.0])
+                    .show(ui, |ui| {
+                        ui.label("Grid");
+                        ui.horizontal(|ui| {
+                            if ui.button("Random").clicked() {
+                                self.grid.random_grid(&self.queue);
+                            }
+                            if ui.button("Clear").clicked() {
+                                self.grid.clear(&self.queue);
+                            }
+                        });
+                        ui.end_row();
+        
+                        ui.label("Cell color");
+                        ui.color_edit_button_rgba_unmultiplied(&mut color);
+                        ui.end_row();
+                    })
+            });
+        if color != self.camera.camera_uniform.cell_color {
+            self.camera.camera_uniform.cell_color = color;
+            self.queue.write_buffer(
+                &self.camera.camera_buffer,
+                0,
+                bytemuck::cast_slice(&[self.camera.camera_uniform]),
+            );
+            self.window.request_redraw();
+        }
 
         egui::Window::new("Fps")
             .title_bar(false)
             .anchor(egui::Align2::RIGHT_TOP, [-10.0, 10.0])
+            .resizable(false)
             .show(&self.egui_ctx, |ui| {
-                ui.label(
-                    egui::RichText::new(format!("FPS: {}", self.time_info.avg_fps as i32))
-                )
+                ui.label(egui::RichText::new(format!(
+                    "FPS: {}",
+                    self.time_info.get_fps() as i32
+                )));
             });
 
         let (play_button, next_state) = match self.simulation_state {
             SimulationState::Running { .. } => ("|| Pause", SimulationState::Stopped),
-            SimulationState::Stopped | SimulationState::AdvanceOnce => ("> Play", SimulationState::Running),
+            SimulationState::Stopped | SimulationState::AdvanceOnce => {
+                ("> Play", SimulationState::Running)
+            }
         };
         let mut generation_per_second = self.generation_per_second;
         egui::Window::new("Controls")
             .title_bar(false)
             .anchor(egui::Align2::CENTER_BOTTOM, [0.0, -10.0])
+            .resizable(false)
             .show(&self.egui_ctx, |ui| {
                 ui.horizontal(|ui| {
                     if ui.button(play_button).clicked() {
@@ -536,16 +644,18 @@ impl State {
                     }
                     ui.add(
                         egui::Slider::new(&mut generation_per_second, 1..=100)
-                        .orientation(egui::SliderOrientation::Horizontal)
-                        //.text("generation per second")
+                            .orientation(egui::SliderOrientation::Horizontal), //.text("generation per second")
                     );
                 })
             });
         self.generation_per_second = generation_per_second;
 
         let full_output = self.egui_ctx.end_pass();
-        self.egui_winit.handle_platform_output(&self.window, full_output.platform_output);
-        let paint_jobs = self.egui_ctx.tessellate(full_output.shapes, self.window.scale_factor() as f32);
+        self.egui_winit
+            .handle_platform_output(&self.window, full_output.platform_output);
+        let paint_jobs = self
+            .egui_ctx
+            .tessellate(full_output.shapes, self.window.scale_factor() as f32);
 
         let screen_descriptor = egui_wgpu::ScreenDescriptor {
             size_in_pixels: [self.config.width, self.config.height],
@@ -554,10 +664,17 @@ impl State {
 
         for (id, image_delta) in &full_output.textures_delta.set {
             for delta in image_delta {
-                self.egui_wgpu.update_texture(&self.device, &self.queue, *id, delta);
+                self.egui_wgpu
+                    .update_texture(&self.device, &self.queue, *id, delta);
             }
         }
-        self.egui_wgpu.update_buffers(&self.device, &self.queue, command_encoder, &paint_jobs, &screen_descriptor);
+        self.egui_wgpu.update_buffers(
+            &self.device,
+            &self.queue,
+            command_encoder,
+            &paint_jobs,
+            &screen_descriptor,
+        );
 
         (paint_jobs, screen_descriptor, full_output.textures_delta)
     }
@@ -625,12 +742,12 @@ impl State {
 
             render_pass.set_pipeline(&self.render_pipeline);
             render_pass.set_bind_group(0, grid_bind_group, &[]);
-            render_pass.set_bind_group(1, &self.camera_bind_group, &[]);
+            render_pass.set_bind_group(1, &self.camera.camera_bind_group, &[]);
             render_pass.draw(0..3, 0..1);
         }
 
         // egui pass
-        {   
+        {
             let ui_color_attachments = [Some(wgpu::RenderPassColorAttachment {
                 view: &view,
                 resolve_target: None,
@@ -641,15 +758,18 @@ impl State {
                 },
             })];
 
-            let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("UI Pass"),
-                color_attachments: &ui_color_attachments,
-                depth_stencil_attachment: None,
-                occlusion_query_set: None,
-                timestamp_writes: None,
-                multiview_mask: None,
-            }).forget_lifetime();
-            self.egui_wgpu.render(&mut render_pass, &paint_jobs, &screen_descriptor);
+            let mut render_pass = encoder
+                .begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("UI Pass"),
+                    color_attachments: &ui_color_attachments,
+                    depth_stencil_attachment: None,
+                    occlusion_query_set: None,
+                    timestamp_writes: None,
+                    multiview_mask: None,
+                })
+                .forget_lifetime();
+            self.egui_wgpu
+                .render(&mut render_pass, &paint_jobs, &screen_descriptor);
         }
 
         self.queue.submit(std::iter::once(encoder.finish()));
@@ -756,25 +876,13 @@ impl ApplicationHandler<State> for App {
             None => return,
         };
 
-        let ui_event_response = state.egui_winit.on_window_event(&state.window, &event);
-        if ui_event_response.consumed {
-            match event {
-                WindowEvent::CloseRequested => event_loop.exit(),
-                WindowEvent::Resized(size) => state.resize(size.width, size.height),
-                WindowEvent::RedrawRequested => {
-                    state.update();
-                    match state.render() {
-                        Ok(_) => (),
-                        Err(e) => {
-                            log::error!("{e}");
-                            event_loop.exit();
-                        }
-                    }
-                }
-                _ => ()
-            }
-            return;
-        }
+        let is_over_ui = state
+            .egui_ctx
+            .pointer_hover_pos()
+            .and_then(|pos| state.egui_ctx.layer_id_at(pos))
+            .map_or(false, |layer| layer.order != egui::Order::Background);
+
+        let _ = state.egui_winit.on_window_event(&state.window, &event);
 
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
@@ -797,14 +905,30 @@ impl ApplicationHandler<State> for App {
                         ..
                     },
                 ..
-            } => state.handle_key(event_loop, code, key_state.is_pressed()),
-            WindowEvent::MouseInput { state: mouse_state, button, .. } => state.handle_mouse(button, mouse_state),
+            } => {
+                if !state.egui_ctx.egui_wants_keyboard_input() {
+                    state.handle_key(event_loop, code, key_state.is_pressed())
+                }
+            }
+            WindowEvent::MouseInput {
+                state: mouse_state,
+                button,
+                ..
+            } => {
+                if mouse_state == winit::event::ElementState::Released || !is_over_ui {
+                    state.handle_mouse(button, mouse_state.is_pressed())
+                }
+            }
             WindowEvent::Touch(touch) => state.handle_touch(
                 touch.phase == winit::event::TouchPhase::Started
                     || touch.phase == winit::event::TouchPhase::Moved,
             ),
             WindowEvent::CursorMoved { position, .. } => state.handle_mouse_mouvement(position),
-            WindowEvent::MouseWheel { delta, .. } => state.handle_mouse_wheel(delta),
+            WindowEvent::MouseWheel { delta, .. } => {
+                if !is_over_ui {
+                    state.handle_mouse_wheel(delta)
+                }
+            }
             _ => {}
         }
     }
