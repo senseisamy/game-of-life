@@ -6,23 +6,26 @@ edition = "2024"
 [lib]
 crate-type = ["cdylib", "rlib"]
 
+# general dependencies
 [dependencies]
 anyhow = "1.0.104"
 egui = { version = "0.37", features = ["default_fonts"] }
 egui-wgpu = { version = "0.37.0", features = ["winit"] }
-env_logger = "0.11.11"
 getrandom = { version = "0.4.3", features = ["wasm_js"] }
 log = "0.4.35"
-pollster = "1.0.1"
 rand = "0.10.3"
 wgpu = "30.0.2"
 winit = { version = "0.30.13", features = ["android-native-activity"] }
 web-time = "1.1"
 bytemuck = { version = "1.25.2", features = ["derive"] }
 
+# not wasm dependencies
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 egui-winit = "0.37.0"
+env_logger = "0.11.11"
+pollster = "1.0.1"
 
+# wasm dependencies
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 egui-winit = { version = "0.37", default-features = false }
 console_error_panic_hook = "0.1.7"

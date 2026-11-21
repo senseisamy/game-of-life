@@ -1,5 +1,5 @@
-const ALIVE_COLOR: [u8; 4] = [255; 4];
-const DEAD_COLOR: [u8; 4] = [15, 15, 15, 255];
+pub const ALIVE_COLOR: [u8; 4] = [255; 4];
+pub const DEAD_COLOR: [u8; 4] = [15, 15, 15, 255];
 
 pub struct Grid {
     texture_a: wgpu::Texture,
@@ -9,7 +9,7 @@ pub struct Grid {
     render_bind_group_b: wgpu::BindGroup,
     compute_bind_group_b: wgpu::BindGroup,
     generation: u64,
-    alive_cell_color: [u8; 4]
+    alive_cell_color: [u8; 4],
 }
 
 impl Grid {
@@ -60,7 +60,7 @@ impl Grid {
 
         let render_bind_group_a = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("Render Bind Group"),
-            layout: &render_bind_group_layout,
+            layout: render_bind_group_layout,
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
@@ -74,7 +74,7 @@ impl Grid {
         });
         let render_bind_group_b = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("Render Bind Group"),
-            layout: &render_bind_group_layout,
+            layout: render_bind_group_layout,
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
@@ -89,7 +89,7 @@ impl Grid {
 
         let compute_bind_group_a = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("Compute Bind Group"),
-            layout: &compute_bind_group_layout,
+            layout: compute_bind_group_layout,
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
@@ -103,7 +103,7 @@ impl Grid {
         });
         let compute_bind_group_b = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("Compute Bind Group"),
-            layout: &compute_bind_group_layout,
+            layout: compute_bind_group_layout,
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
@@ -145,7 +145,7 @@ impl Grid {
 
         queue.write_texture(
             wgpu::TexelCopyTextureInfo {
-                texture: texture,
+                texture,
                 mip_level: 0,
                 origin: wgpu::Origin3d::ZERO,
                 aspect: wgpu::TextureAspect::All,
@@ -184,7 +184,7 @@ impl Grid {
 
         queue.write_texture(
             wgpu::TexelCopyTextureInfo {
-                texture: texture,
+                texture,
                 mip_level: 0,
                 origin: wgpu::Origin3d::ZERO,
                 aspect: wgpu::TextureAspect::All,
@@ -209,7 +209,7 @@ impl Grid {
 
         queue.write_texture(
             wgpu::TexelCopyTextureInfo {
-                texture: texture,
+                texture,
                 mip_level: 0,
                 origin: wgpu::Origin3d { x, y, z: 0 },
                 aspect: wgpu::TextureAspect::All,

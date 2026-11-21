@@ -1,4 +1,5 @@
 mod grid;
+mod patterns;
 
 use std::sync::Arc;
 
@@ -48,7 +49,6 @@ struct TimeInfo {
     dt_sum: f32,
     frame_count: f32,
 }
-
 
 impl TimeInfo {
     pub fn new() -> Self {
@@ -531,7 +531,7 @@ impl State {
 
         let (workgroup_x, workgroup_y) = {
             let size = self.grid.get_grid_size();
-            ((size.width + 7) / 8, (size.height + 7) / 8)
+            (size.width.div_ceil(8), size.height.div_ceil(8))
         };
 
         {
@@ -561,24 +561,16 @@ impl State {
         }
     }
 
-    pub fn build_ui(
-        &mut self,
-        command_encoder: &mut wgpu::CommandEncoder,
-    ) -> (
-        Vec<egui::ClippedPrimitive>,
-        egui_wgpu::ScreenDescriptor,
-        egui::TexturesDelta,
-    ) {
-        let raw_inputs = self.egui_winit.take_egui_input(&self.window);
-        self.egui_ctx.begin_pass(raw_inputs);
-
+    fn menu_ui(&mut self) {
         let mut color = self.camera.camera_uniform.cell_color;
+        let mut generation_per_second = self.generation_per_second;
         egui::Window::new("Menu")
             .anchor(egui::Align2::LEFT_TOP, [10.0, 10.0])
-            .default_open(false)
             .resizable(false)
-            //.min_width(0.0)
-            .default_width(0.0)
+            .auto_sized()
+            .default_open(false)
+            //.max_width(0.0)
+            //.default_width(0.0)
             .show(&self.egui_ctx, |ui| {
                 egui::Grid::new("menu_grid")
                     .num_columns(2)
@@ -594,9 +586,20 @@ impl State {
                             }
                         });
                         ui.end_row();
-        
+
+                        ui.label("Gen/sec");
+                        ui.add(
+                            egui::Slider::new(&mut generation_per_second, 1..=100)
+                                .orientation(egui::SliderOrientation::Horizontal),
+                        );
+                        ui.end_row();
+
                         ui.label("Cell color");
                         ui.color_edit_button_rgba_unmultiplied(&mut color);
+                        ui.end_row();
+
+                        ui.label("Patterns");
+                        let _ = ui.button("Browse");
                         ui.end_row();
                     })
             });
@@ -609,6 +612,21 @@ impl State {
             );
             self.window.request_redraw();
         }
+        self.generation_per_second = generation_per_second;
+    }
+
+    pub fn build_ui(
+        &mut self,
+        command_encoder: &mut wgpu::CommandEncoder,
+    ) -> (
+        Vec<egui::ClippedPrimitive>,
+        egui_wgpu::ScreenDescriptor,
+        egui::TexturesDelta,
+    ) {
+        let raw_inputs = self.egui_winit.take_egui_input(&self.window);
+        self.egui_ctx.begin_pass(raw_inputs);
+
+        self.menu_ui();
 
         egui::Window::new("Fps")
             .title_bar(false)
@@ -622,12 +640,11 @@ impl State {
             });
 
         let (play_button, next_state) = match self.simulation_state {
-            SimulationState::Running { .. } => ("|| Pause", SimulationState::Stopped),
+            SimulationState::Running => ("|| Pause", SimulationState::Stopped),
             SimulationState::Stopped | SimulationState::AdvanceOnce => {
                 ("> Play", SimulationState::Running)
             }
         };
-        let mut generation_per_second = self.generation_per_second;
         egui::Window::new("Controls")
             .title_bar(false)
             .anchor(egui::Align2::CENTER_BOTTOM, [0.0, -10.0])
@@ -637,13 +654,8 @@ impl State {
                     if ui.button(play_button).clicked() {
                         self.simulation_state = next_state;
                     }
-                    ui.add(
-                        egui::Slider::new(&mut generation_per_second, 1..=100)
-                            .orientation(egui::SliderOrientation::Horizontal), //.text("generation per second")
-                    );
                 })
             });
-        self.generation_per_second = generation_per_second;
 
         let full_output = self.egui_ctx.end_pass();
         self.egui_winit
@@ -799,6 +811,13 @@ impl App {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+impl Default for App {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ApplicationHandler<State> for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         #[allow(unused_mut)]
@@ -877,7 +896,7 @@ impl ApplicationHandler<State> for App {
             .egui_ctx
             .pointer_hover_pos()
             .and_then(|pos| state.egui_ctx.layer_id_at(pos))
-            .map_or(false, |layer| layer.order != egui::Order::Background);
+            .is_some_and(|layer| layer.order != egui::Order::Background);
 
         let _ = state.egui_winit.on_window_event(&state.window, &event);
 
@@ -921,11 +940,7 @@ impl ApplicationHandler<State> for App {
                     || touch.phase == winit::event::TouchPhase::Moved,
             ),
             WindowEvent::CursorMoved { position, .. } => state.handle_mouse_mouvement(position),
-            WindowEvent::MouseWheel { delta, .. } => {
-                if !is_over_ui {
-                    state.handle_mouse_wheel(delta)
-                }
-            }
+            WindowEvent::MouseWheel { delta, .. } if !is_over_ui => state.handle_mouse_wheel(delta),
             _ => {}
         }
     }
