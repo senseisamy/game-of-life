@@ -19,6 +19,8 @@ use wasm_bindgen::prelude::*;
 #[cfg(target_arch = "wasm32")]
 use winit::platform::web::EventLoopExtWebSys;
 
+use crate::patterns::Pattern;
+
 enum SimulationState {
     Running,
     AdvanceOnce,
@@ -110,6 +112,8 @@ pub struct State {
     cursor_position: winit::dpi::PhysicalPosition<f64>,
     camera: Camera,
     is_panning: bool,
+    is_pattern_open: bool,
+    selected_pattern: Option<Pattern>,
     egui_ctx: egui::Context,
     egui_winit: egui_winit::State,
     egui_wgpu: egui_wgpu::Renderer,
@@ -227,23 +231,23 @@ impl State {
             });
 
         let grid = grid::Grid::new(
-            (512, 512),
+            (4096, 4096),
             &device,
             &render_bind_group_layout,
             &compute_bind_group_layout,
         );
 
-        grid.random_grid(&queue);
+        grid.clear(&queue);
 
         let simulation_state = SimulationState::Stopped;
 
-        let generation_per_second = 2;
+        let generation_per_second = 10;
 
         let time_info = TimeInfo::new();
 
         let cursor_position = winit::dpi::PhysicalPosition::new(0.0, 0.0);
 
-        let zoom = 2.0;
+        let zoom = 20.0;
         let aspect_ratio = size.height as f32 / size.width as f32;
 
         let camera_uniform = CameraUniform {
@@ -382,6 +386,8 @@ impl State {
             time_info,
             camera,
             is_panning: false,
+            is_pattern_open: false,
+            selected_pattern: None,
             cursor_position,
             egui_ctx,
             egui_winit,
@@ -475,7 +481,10 @@ impl State {
 
                 if x >= 0.0 && y >= 0.0 && x < grid_size.width as f64 && y < grid_size.height as f64
                 {
-                    self.grid.set_cell_alive(x as u32, y as u32, &self.queue);
+                    match &self.selected_pattern {
+                        None => self.grid.set_cell_alive(x as u32, y as u32, &self.queue),
+                        Some(pattern) => self.grid.spawn_pattern(x as u32, y as u32, pattern, &self.queue),
+                    }
                     self.window.request_redraw();
                 }
             }
@@ -561,6 +570,34 @@ impl State {
         }
     }
 
+    fn pattern_ui(&mut self) {
+        let modal = egui::Modal::new(egui::Id::unique("Modal Pattern"))
+            .show(&self.egui_ctx, |ui| {
+                ui.heading("Patterns");
+                egui::Grid::new("all patterns")
+                    .num_columns(3)
+                    .spacing([15.0, 10.0])
+                    .show(ui, |ui| {
+                        if ui.button("glider").clicked() {
+                            self.selected_pattern = Some(patterns::GLIDER);
+                            ui.close();
+                        }
+                        if ui.button("lwss").clicked() {
+                            self.selected_pattern = Some(patterns::LWSS);
+                            ui.close();
+                        }
+                        if ui.button("GGG").clicked() {
+                            self.selected_pattern = Some(patterns::GGG);
+                            ui.close();
+                        }
+                        ui.end_row();
+                    })
+            });
+        if modal.should_close() {
+            self.is_pattern_open = false;
+        }
+    }
+
     fn menu_ui(&mut self) {
         let mut color = self.camera.camera_uniform.cell_color;
         let mut generation_per_second = self.generation_per_second;
@@ -599,7 +636,9 @@ impl State {
                         ui.end_row();
 
                         ui.label("Patterns");
-                        let _ = ui.button("Browse");
+                        if ui.button("Browse").clicked() {
+                            self.is_pattern_open = true;
+                        }
                         ui.end_row();
                     })
             });
@@ -656,6 +695,29 @@ impl State {
                     }
                 })
             });
+
+        let mut deselect = false;
+        if let Some(pattern) = &self.selected_pattern {
+            egui::Window::new("Selected Pattern")
+                .title_bar(false)
+                .anchor(egui::Align2::LEFT_BOTTOM, [10.0, -10.0])
+                .resizable(false)
+                .show(&self.egui_ctx, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(egui::RichText::new(format!("Selected Pattern: {}", pattern.name)));
+                        if ui.button("x").clicked() {
+                            deselect = true;
+                        }
+                    })
+                });
+            }
+        if deselect {
+            self.selected_pattern = None;
+        }
+
+        if self.is_pattern_open {
+            self.pattern_ui();
+        }
 
         let full_output = self.egui_ctx.end_pass();
         self.egui_winit

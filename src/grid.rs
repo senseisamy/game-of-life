@@ -1,3 +1,5 @@
+use crate::patterns::Pattern;
+
 pub const ALIVE_COLOR: [u8; 4] = [255; 4];
 pub const DEAD_COLOR: [u8; 4] = [15, 15, 15, 255];
 
@@ -199,7 +201,6 @@ impl Grid {
         )
     }
 
-    #[allow(unused)]
     pub fn set_cell_alive(&self, x: u32, y: u32, queue: &wgpu::Queue) {
         let texture = if self.is_generation_even() {
             &self.texture_a
@@ -223,6 +224,34 @@ impl Grid {
             wgpu::Extent3d {
                 width: 1,
                 height: 1,
+                depth_or_array_layers: 1,
+            },
+        );
+    }
+
+    pub fn spawn_pattern(&self, x: u32, y: u32, pattern: &Pattern, queue: &wgpu::Queue) {
+        let texture = if self.is_generation_even() {
+            &self.texture_a
+        } else {
+            &self.texture_b
+        };
+
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d { x, y, z: 0 },
+                aspect: wgpu::TextureAspect::All,
+            },
+            &pattern.pixels,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(pattern.width * 4),
+                rows_per_image: Some(pattern.height),
+            },
+            wgpu::Extent3d {
+                width: pattern.width,
+                height: pattern.height,
                 depth_or_array_layers: 1,
             },
         );

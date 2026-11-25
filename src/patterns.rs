@@ -1,17 +1,17 @@
 pub struct Pattern {
-    name: &'static str,
-    width: u32,
-    height: u32,
-    pixels: &'static [u8],
+    pub name: &'static str,
+    pub width: u32,
+    pub height: u32,
+    pub pixels: &'static [u8],
 }
 
 macro_rules! rgba_pattern {
     ($($cell:expr),* $(,)?) => {
         &[
             $(
-                if $cell != 0 { 255 } else { 0 },
-                if $cell != 0 { 255 } else { 0 },
-                if $cell != 0 { 255 } else { 0 },
+                if $cell != 0 { 255 } else { 15 },
+                if $cell != 0 { 255 } else { 15 },
+                if $cell != 0 { 255 } else { 15 },
                 255,
             )*
         ]
