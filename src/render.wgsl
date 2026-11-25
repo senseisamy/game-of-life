@@ -44,6 +44,10 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOutput {
 
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
+    if (in.uv.x < 0.0 || in.uv.x > 1.0 || in.uv.y < 0.0 || in.uv.y > 1.0) {
+        discard;
+    }
+
     let tex_color = textureSample(t_grid, s_grid, in.uv);
     return tex_color * camera.cell_color;
 }

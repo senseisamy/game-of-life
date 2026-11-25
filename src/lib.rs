@@ -421,7 +421,8 @@ impl State {
         let ndc_x = (self.cursor_position.x as f32 / width) * 2.0 - 1.0;
         let ndc_y = 1.0 - (self.cursor_position.y as f32 / height) * 2.0;
 
-        let new_zoom = (self.camera.zoom * multiplier).clamp(0.1, 50.0);
+
+        let new_zoom = (self.camera.zoom * multiplier).clamp(0.5, 50.0);
         let actual_multiplier = new_zoom / self.camera.zoom;
         self.camera.zoom = new_zoom;
 
@@ -791,9 +792,9 @@ impl State {
                 depth_slice: None,
                 ops: wgpu::Operations {
                     load: wgpu::LoadOp::Clear(wgpu::Color {
-                        r: 0.1,
-                        g: 0.2,
-                        b: 0.3,
+                        r: 15.0 / 255.0,
+                        g: 15.0 / 255.0,
+                        b: 15.0 / 255.0,
                         a: 1.0,
                     }),
                     store: wgpu::StoreOp::Store,
